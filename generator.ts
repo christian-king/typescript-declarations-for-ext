@@ -14,6 +14,8 @@ module jsduck {
     export interface Class {
         name: string;
         alternateClassNames: string[];
+        doc: string;
+        short_doc: string;
         extends: string;
         singleton: boolean;
         members: Member[];
@@ -24,11 +26,13 @@ module jsduck {
     export interface Member {
         tagname: string;
         name: string;
+        doc: string;
+        short_doc: string;
         type: string;
         private: boolean;
         protected: boolean;
         owner: string;
-        static: boolean;
+        isStatic: boolean;
         optional: boolean;
         overrides: { name: string; owner: string; }[];
         params: Param[];
@@ -237,12 +241,12 @@ function lookupClass(classes: jsduck.Class[], name: string):jsduck.Class {
 }
 
 
-function lookupMember(members: jsduck.Member[], name: string, tagnames?: string[], static?: boolean):jsduck.Member {
+function lookupMember(members: jsduck.Member[], name: string, tagnames?: string[], isStatic?: boolean):jsduck.Member {
     for (var i=0; i<members.length; i++) {
 
         var member = members[i],
             tagMatch = !tagnames || tagnames.indexOf(member.tagname) !== -1,
-            staticMatch = typeof static !== 'boolean' || !!member.static === static;
+            staticMatch = typeof isStatic !== 'boolean' || !!member.isStatic === isStatic;
 
         if (member.name === name && tagMatch && staticMatch) {
             return member;
@@ -255,7 +259,7 @@ function lookupMember(members: jsduck.Member[], name: string, tagnames?: string[
 // Whether the visibility rules say we should emit this member
 function isMemberVisible(cls: jsduck.Class, member: jsduck.Member):boolean {
 
-    return member.protected ? (!cls.singleton && !member.static) : !member.private;
+    return member.protected ? (!cls.singleton && !member.isStatic) : !member.private;
 }
 
 
@@ -293,16 +297,16 @@ function writeMember(classes: jsduck.Class[],
     // don't repeat inherited members, because they are already in the parent class
     // Ext sometimes has overrides with incompatible types too, which is weird.
     if (cls.singleton) {
-        if (member.static || constructor || !isMemberVisible(cls, member)) {
+        if (member.isStatic || constructor || !isMemberVisible(cls, member)) {
             return;
         }
     } else {
-        if (!constructor && (!isMemberVisible(cls, member) || parentIncludesMember(classes, cls, member.name, member.static))) {
+        if (!constructor && (!isMemberVisible(cls, member) || parentIncludesMember(classes, cls, member.name, member.isStatic))) {
             return;
         }
     }
 
-    var staticStr = (cls.singleton || member.static) ? 'static ' : '';
+    var staticStr = (cls.singleton || member.isStatic) ? 'static ' : '';
 
     if (member.tagname === 'property') {
     
@@ -319,7 +323,7 @@ function writeMember(classes: jsduck.Class[],
         if (!cls.singleton && configTag) {
             typ = convertFromExtType(classes, configTag.type + '|' + member.type);
         }
-
+        writeComment(member, indent, output);
         output.push(indent + '    ' + staticStr + quote(member.name) + opt + typ + ';');
     }
     else if (member.tagname === 'method') {
@@ -365,11 +369,13 @@ function writeMember(classes: jsduck.Class[],
             }
             
             typ = convertFromExtType(classes, typ, param.properties);
-            
+            if (constructor && typ === 'any' && hasConfig(cls)) {
+                typ = cls.name + 'Config';
+            }
             params.push(paramName + (optional ? '?: ' : ': ') + typ);
             prevParamNames[paramName] = true;
         }
-        
+        writeComment(member, indent, output);
         output.push(indent + '    ' + staticStr + quote(member.name) + '(' + params.join(', ') + ')' + retStr + ';');
     }
     else if (member.tagname === 'cfg') {
@@ -378,13 +384,49 @@ function writeMember(classes: jsduck.Class[],
             return; // we will emit the method/property tag instead
         }
 
-        if (!cls.singleton) {
+        if (!cls.singleton && member.isStatic) {
             var typ = convertFromExtType(classes, member.type);
+            writeComment(member, indent, output);
             output.push(indent + '    ' + staticStr + quote(member.name) + ': ' + typ + ';');
         }
     }
 }
 
+function writeConfig(classes: jsduck.Class[],
+                     cls: jsduck.Class,
+                     members: jsduck.Member[],
+                     member: jsduck.Member,
+                     indent: string,
+                     output: string[]): void {
+    if (parentIncludesMember(classes, cls, member.name, member.isStatic) || !isMemberVisible(cls, member)) {
+        return; // We are extending the parent config, don't duplicate members
+    }
+    writeComment(member, indent, output);
+    if (!cls.singleton) {
+        var typ = convertFromExtType(classes, member.type);
+        output.push(indent + '    ' + quote(member.name) + '?: ' + typ + ';');
+    }
+}
+
+function formatComment(obj: jsduck.Class|jsduck.Member, indent: string): string {
+    if (obj.short_doc) {
+        return obj.short_doc.replace('...', '');
+    } else {
+        var tags = /<\/?([a-z][a-z0-9]*)\b[^>]*>/gi,
+            commentsAndPhpTags = /<!--[\s\S]*?-->|<\?(?:php)?[\s\S]*?\?>/gi;
+        return obj.doc.replace(commentsAndPhpTags, '')
+            .replace(tags, '').substring(0, 255);   
+    }
+}
+
+/**
+ * Writes a short comment for the member or class for contextual documentation
+ */
+function writeComment(obj: jsduck.Class|jsduck.Member, indent: string, output: string[]): void {
+    output.push(indent + "/**");
+    output.push(indent + formatComment(obj, indent));
+    output.push(indent + "*/");    
+}
 
 // TODO: include docs in the generated file
 function writeTransformedClasses(classes: jsduck.Class[], outputFile: string):void {
@@ -393,7 +435,7 @@ function writeTransformedClasses(classes: jsduck.Class[], outputFile: string):vo
         output = [];
 
     output.push('// Ext type declarations (Typescript 1.4 or newer) generated on ' + new Date());
-    output.push('// For more information, see: https://github.com/Dretch/typescript-declarations-for-ext');
+    output.push('// For more information, see: https://github.com/revelation0/typescript-declarations-for-ext');
 
     for (var i=0; i<modules.length; i++) {
     
@@ -419,8 +461,10 @@ function writeTransformedClasses(classes: jsduck.Class[], outputFile: string):vo
                 console.warn('Warning: unable to find parent class, so omitting extends clause: ' + cls.extends);
             }
 
+            emitClassConfig(classes, cls, name, normalizedParent, indent, output);
             var extend = !cls.singleton && normalizedParent ? ' extends ' + normalizedParent : '';
 
+            writeComment(cls, indent, output);
             output.push(indent + modifier + ' class ' + name + extend + ' {');
             cls.members.forEach(function(member) {
                 writeMember(classes, cls, cls.members, member, indent, output);
@@ -436,6 +480,31 @@ function writeTransformedClasses(classes: jsduck.Class[], outputFile: string):vo
     fs.writeFileSync(outputFile, output.join('\r\n'));
 }
 
+function emitClassConfig(classes: jsduck.Class[], cls: jsduck.Class, className: string, parentName: string, indent: string, output: Array<string>) {
+    if (hasConfig(cls)) {
+        var extend = !cls.singleton && parentName && hasConfig(lookupClass(classes,cls.extends)) ? ' extends ' + parentName + "Config" : '';
+        output.push(indent + 'interface ' + className + 'Config' + extend + ' {');
+        cls.members.forEach(function(member) {
+            if(member.tagname === 'cfg') {
+                writeConfig(classes, cls, cls.members, member, indent, output);
+            }
+        });
+        output.push(indent + '}')
+    }
+}
+
+function hasConfig(cls: jsduck.Class) {
+    for (var i=0; i<cls.members.length; i++) {
+        if (cls.members[i].tagname == 'cfg') {
+            return true;
+        }
+    }
+    return false;
+}
+
+function hasParamType(types: string, type: string) {
+    return (types.split("|").indexOf(type) !== -1);
+}
 
 if (process.argv.length <= 2) {
     console.error('This script needs two arguments: [input-folder-containing-jsduck-export] [output-file]');
